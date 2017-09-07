@@ -1,13 +1,14 @@
 package com.example
 
 import com.example.config.{DefaultConfigHolder, LocalSparkHolder}
-import org.apache.spark.ml.classification.LogisticRegression
-import org.apache.spark.ml.linalg.{Vector, Vectors}
-import org.apache.spark.ml.param.ParamMap
-import org.apache.spark.sql.Row
+import org.apache.spark.sql.{DataFrame, Row}
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+import org.apache.spark.sql.functions._
 
-object Main extends App with LocalSparkHolder with DefaultConfigHolder  {
-	val training = sparkSession.createDataFrame(Seq(
+import scala.util.matching.Regex
+
+object Main extends LocalSparkHolder with DefaultConfigHolder  {
+	/*val training = sparkSession.createDataFrame(Seq(
 		(1.0, Vectors.dense(0.0, 1.1, 0.1)),
 		(0.0, Vectors.dense(2.0, 1.0, -1.0)),
 		(0.0, Vectors.dense(2.0, 1.3, 1.0)),
@@ -62,46 +63,61 @@ object Main extends App with LocalSparkHolder with DefaultConfigHolder  {
 		.collect()
 		.foreach { case Row(features: Vector, label: Double, prob: Vector, prediction: Double) =>
 			println(s"($features, $label) -> prob=$prob, prediction=$prediction")
-		}
-	/*object Config {
-		@Parameter(names = Array("-st", "--slackToken"))
-		var slackToken: String = null
-		@Parameter(names = Array("-nc", "--numClusters"))
-		var numClusters: Int = 4
-		@Parameter(names = Array("-po", "--predictOutput"))
-		var predictOutput: String = null
-		@Parameter(names = Array("-td", "--trainData"))
-		var trainData: String = null
-		@Parameter(names = Array("-ml", "--modelLocation"))
-		var modelLocation: String = null
-	}*/
+		}*/
 
-//	def main(args: Array[String]): Unit ={
+	val objectsLocation = "/home/ilia/Documents/bidata_docs/task10/session.dataset/Objects.csv"
+	val choicesLocation = "/home/ilia/Documents/bidata_docs/task10/session.dataset/Target.csv"
+	val descLocation = "/home/ilia/Documents/bidata_docs/task10/session.dataset/PropertyDesciptionEN.txt"
 
-//		val sparkSession = SparkSession
-//			.builder()
-//			.appName("sparkML")
-//			.enableHiveSupport()
-//			.getOrCreate()
-//
-//		val sparkContext = sparkSession.sparkContext
-//		val sqLContext = sparkSession.sqlContext
-//		val ssc = new StreamingContext(sparkContext, Seconds(10))
-//
-//		import sqLContext.implicits._
-//		val descrRdd = sparkContext.textFile(args(1))
-//		val objectsDF: DataFrame = sparkContext.textFile(args(0)).toDF()
-//		val choicesDF: DataFrame = sparkContext.textFile(args(2)).toDF()
+	def main(args: Array[String]): Unit ={
+
+		val sparkContext = sparkSession.sparkContext
+		val sqLContext = sparkSession.sqlContext
+		val ssc = new StreamingContext(sparkContext, Seconds(10))
+
+		val filterRegex = "[0-9]\\)".r
+
+		import sqLContext.implicits._
+
+		val descrRdd = sparkContext
+			.textFile(descLocation)
+	  	.filter(str => str.trim.nonEmpty)
+	  	.filter(str => filterRegex.findFirstIn(str).isDefined)
+	  	.map(str => splitByRegex(str, ".*\\)\\s(.*):.*".r))
+	  	.collect().toSeq.dropRight(1)
+
+		val choicesDF = sparkContext
+			.textFile(choicesLocation)
+			.zipWithIndex()
+			.map{case (line, id) => (id, line.toInt)}
+			.toDF("id", "dec")
+
+		val objects = sqLContext
+			.read
+			.format("com.databricks.spark.csv")
+			.option("header", "false")
+			.option("inferSchema", "true")
+			.option("delimiter", ";")
+			.load(objectsLocation)
+			.toDF(descrRdd:_*)
+			.withColumn("Id", monotonically_increasing_id())
 
 
+		val objectsWithDeceison = objects.join(choicesDF,"id")
 
+		println("schema: " + objects.schema)
+		objects.limit(10).foreach(row => println(row))
 
-
-
+		println("schame with decisions: " + objectsWithDeceison.schema)
+		objectsWithDeceison.limit(10).foreach(row => println(row))
 
 
 //		ssc.start()
-//	}
+	}
+
+	def splitByRegex(str: String, r: Regex) = str match {
+		case r(group) => group
+	}
 
 //	def mms(args: Array[String]) {
 //		val conf = new SparkConf().setAppName("SlackStreamingWithML")
