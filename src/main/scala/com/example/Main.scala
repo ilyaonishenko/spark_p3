@@ -4,7 +4,7 @@ package com.example
 
 import com.example.config.{DefaultConfigHolder, LocalSparkHolder}
 import org.apache.spark.ml.Pipeline
-import org.apache.spark.ml.classification.{BinaryLogisticRegressionSummary, DecisionTreeClassifier, LogisticRegression}
+import org.apache.spark.ml.classification._
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.sql.DataFrame
@@ -64,7 +64,6 @@ object Main extends LocalSparkHolder with DefaultConfigHolder {
 			.drop(col("The number of utilized cards"))
 			.na.drop()
 
-
 		val vectorAssembler = new VectorAssembler()
 			.setInputCols(descrRdd.dropRight(1).toArray)
 			.setOutputCol("features")
@@ -73,88 +72,85 @@ object Main extends LocalSparkHolder with DefaultConfigHolder {
 			.transform(objectsWithDeceison)
 	  	.drop(descrRdd.dropRight(1).toArray:_*)
 
-//		println("BIG BIG SIZE: " + transformedObjects.select("features").count())
-
 		transformedObjects.printSchema()
 
-		val Array(trainingData, testData) = transformedObjects.randomSplit(Array(0.6, 0.4))
+//		transformedObjects.select(col("features")).limit(2).foreach(row => println(row.getAs[Vector](0).size))
+
+		val Array(trainingData, testData) = transformedObjects.randomSplit(Array(0.75, 0.25))
 
 		// Index labels, adding metadata to the label column.
 		// Fit on whole dataset to include all labels in index.
-		val labelIndexer = new StringIndexer()
-			.setInputCol("label")
-			.setOutputCol("indexedLabel")
-			.fit(transformedObjects)
-		// Automatically identify categorical features, and index them.
-		val featureIndexer = new VectorIndexer()
-			.setInputCol("features")
-			.setOutputCol("indexedFeatures")
-			.setMaxCategories(32) // features with > 4 distinct values are treated as continuous.
-			.fit(transformedObjects)
+//		val labelIndexer = new StringIndexer()
+//			.setInputCol("label")
+//			.setOutputCol("indexedLabel")
+//			.fit(transformedObjects)
+//		// Automatically identify categorical features, and index them.
+//		val featureIndexer = new VectorIndexer()
+//			.setInputCol("features")
+//			.setOutputCol("indexedFeatures")
+//			.setMaxCategories(22) // features with > 4 distinct values are treated as continuous.
+//			.fit(transformedObjects)
+
 
 		// Train a DecisionTree model.
-		val dt = new DecisionTreeClassifier()
-			.setLabelCol("indexedLabel")
-			.setFeaturesCol("indexedFeatures")
+//		val dt = new DecisionTreeClassifier()
+//			.setLabelCol("indexedLabel")
+//			.setFeaturesCol("indexedFeatures")
+//
+//		// Convert indexed labels back to original labels.
+//		val labelConverter = new IndexToString()
+//			.setInputCol("prediction")
+//			.setOutputCol("predictedLabel")
+//			.setLabels(labelIndexer.labels)
+//
+//		// Chain indexers and tree in a Pipeline.
+//		val pipeline = new Pipeline()
+//			.setStages(Array(labelIndexer, featureIndexer, dt, labelConverter))
+//
+//		// Train model. This also runs the indexers.
+//		val model = pipeline.fit(trainingData)
+//
+//		// Make predictions.
+//		val predictions = model.transform(testData)
+//
+//		// Select example rows to display.
 
-		// Convert indexed labels back to original labels.
-		val labelConverter = new IndexToString()
-			.setInputCol("prediction")
-			.setOutputCol("predictedLabel")
-			.setLabels(labelIndexer.labels)
+		val numFeatures = 49
 
-		// Chain indexers and tree in a Pipeline.
-		val pipeline = new Pipeline()
-			.setStages(Array(labelIndexer, featureIndexer, dt, labelConverter))
+		val lr = new LogisticRegression()
+			.setMaxIter(500)
+//			.setRegParam(0.3)
+			.setElasticNetParam(0.3)
+			.fit(trainingData)
 
-		// Train model. This also runs the indexers.
-		val model = pipeline.fit(trainingData)
+		println(s"Coefficients: ${lr.coefficients} Intercept: ${lr.intercept}")
 
-		// Make predictions.
-		val predictions = model.transform(testData)
+		val trainingSummary = lr.summary
+		val binarySummary = trainingSummary.asInstanceOf[BinaryLogisticRegressionSummary]
+		val roc = binarySummary.roc
+		val auc = binarySummary.areaUnderROC
 
-		// Select example rows to display.
-		predictions.select("predictedLabel", "label")//.show(10)
+		println("roc: " + roc)
+		println("AUC: " + auc)
+
+		val fMeasure: DataFrame = binarySummary.fMeasureByThreshold
+		val maxFMeasure: Double = fMeasure.select(max("F-Measure")).head().getDouble(0)
+		val bestThreshold: Double = fMeasure.where($"F-Measure" === maxFMeasure)
+			.select("threshold").head().getDouble(0)
+		lr.setThreshold(bestThreshold)
+
+		val summary = lr.evaluate(testData)
+
+		println("probability: " + summary)
+		println(" predictions: ")
+		summary
+			.predictions.select(col("label"), col("prediction"))
 			.write
-			.format("com.databricks.spark.csv")
+	  	.format("com.databricks.spark.csv")
 			.option("header", "true")
 			.save("/home/ilia/Documents/bidata_docs/task10/session.dataset/res")
-
-
-
-
-//		trainingData.show(100)
-//
-//		val lr = new LogisticRegression()
-//			.setMaxIter(10)
-//			.setRegParam(0.3)
-//			.setElasticNetParam(0.8)
-//			.fit(trainingData)
-//
-//		println(s"Coefficients: ${lr.coefficients} Intercept: ${lr.intercept}")
-//
-//		val trainingSummary = lr.summary
-//		val binarySummary = trainingSummary.asInstanceOf[BinaryLogisticRegressionSummary]
-//		val roc = binarySummary.roc
-//		val auc = binarySummary.areaUnderROC
-//
-//		println("roc: " + roc)
-//		println("AUC: " + auc)
-//
-//		val fMeasure: DataFrame = binarySummary.fMeasureByThreshold
-//		val maxFMeasure: Double = fMeasure.select(max("F-Measure")).head().getDouble(0)
-//		val bestThreshold: Double = fMeasure.where($"F-Measure" === maxFMeasure)
-//			.select("threshold").head().getDouble(0)
-//		lr.setThreshold(bestThreshold)
-//
-//		val summary = lr.evaluate(testData)
-//
-//		println("probability: " + summary)
-//		println(" predictions: ")
-//		val predictions: DataFrame = summary
-//			.predictions
+//		predictions.printSchema()
 //	  	.select(col("probability"))
-//
 //		predictions.printSchema()
 //		val n = predictions.first.getAs[org.apache.spark.ml.linalg.Vector](0).size
 //		val vecToSeq = udf((v: Vector) => v.toArray)
