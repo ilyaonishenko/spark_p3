@@ -118,9 +118,9 @@ object Main extends LocalSparkHolder with DefaultConfigHolder {
 		val numFeatures = 49
 
 		val lr = new LogisticRegression()
-			.setMaxIter(500)
+			.setMaxIter(1000)
 //			.setRegParam(0.3)
-			.setElasticNetParam(0.3)
+			.setElasticNetParam(0.7)
 			.fit(trainingData)
 
 		println(s"Coefficients: ${lr.coefficients} Intercept: ${lr.intercept}")
