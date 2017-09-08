@@ -1,14 +1,15 @@
 package com.example
 
+
+
 import com.example.config.{DefaultConfigHolder, LocalSparkHolder}
 import org.apache.spark.ml.Pipeline
-import org.apache.spark.ml.classification.{RandomForestClassificationModel, RandomForestClassifier}
-import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
-import org.apache.spark.ml.feature.{IndexToString, StringIndexer, VectorAssembler, VectorIndexer}
-import org.apache.spark.sql.{DataFrame, Row}
-import org.apache.spark.streaming.{Seconds, StreamingContext}
-import org.apache.spark.sql.functions._
+import org.apache.spark.ml.classification.{BinaryLogisticRegressionSummary, DecisionTreeClassifier, LogisticRegression}
+import org.apache.spark.ml.feature._
+import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.types.{DataTypes, DoubleType, IntegerType}
+import org.apache.spark.sql.functions._
 
 import scala.util.matching.Regex
 
@@ -22,7 +23,6 @@ object Main extends LocalSparkHolder with DefaultConfigHolder {
 
 		val sparkContext = sparkSession.sparkContext
 		val sqLContext = sparkSession.sqlContext
-		val ssc = new StreamingContext(sparkContext, Seconds(10))
 
 		val filterRegex = "[0-9]\\)".r
 
@@ -33,12 +33,14 @@ object Main extends LocalSparkHolder with DefaultConfigHolder {
 			.filter(str => str.trim.nonEmpty)
 			.filter(str => filterRegex.findFirstIn(str).isDefined)
 			.map(str => splitByRegex(str, ".*\\)\\s(.*):.*".r))
-			.collect().toSeq.dropRight(1)
+			.collect()
+			.toSeq
+			.dropRight(1)
 
 		val choicesDF = sparkContext
 			.textFile(choicesLocation)
 			.zipWithIndex()
-			.map { case (line, id) => (id, line.toInt) }
+			.map { case (line, id) => (id, line.toDouble) }
 			.toDF("Id", "label")
 
 		val objects = sqLContext
@@ -60,60 +62,114 @@ object Main extends LocalSparkHolder with DefaultConfigHolder {
 			.withColumn("Average amount of the delayed payment, USD", objects("Average amount of the delayed payment, USD").cast(DoubleType))
 			.withColumn("Maximum amount of the delayed payment, USD", objects("Maximum amount of the delayed payment, USD").cast(DoubleType))
 			.drop(col("The number of utilized cards"))
-			.filter(row => !row.anyNull)
+			.na.drop()
 
-		val labelIndexer = new StringIndexer()
-			.setInputCol("label")
-			.setOutputCol("indexedLabel")
-			.fit(objectsWithDeceison)
 
 		val vectorAssembler = new VectorAssembler()
 			.setInputCols(descrRdd.dropRight(1).toArray)
 			.setOutputCol("features")
 
-		objectsWithDeceison.limit(20).foreach(obj => println(obj))
+		val transformedObjects = vectorAssembler
+			.transform(objectsWithDeceison)
+	  	.drop(descrRdd.dropRight(1).toArray:_*)
 
-		val transformedObjects = vectorAssembler.transform(objectsWithDeceison)
+//		println("BIG BIG SIZE: " + transformedObjects.select("features").count())
 
+		transformedObjects.printSchema()
+
+		val Array(trainingData, testData) = transformedObjects.randomSplit(Array(0.6, 0.4))
+
+		// Index labels, adding metadata to the label column.
+		// Fit on whole dataset to include all labels in index.
+		val labelIndexer = new StringIndexer()
+			.setInputCol("label")
+			.setOutputCol("indexedLabel")
+			.fit(transformedObjects)
+		// Automatically identify categorical features, and index them.
 		val featureIndexer = new VectorIndexer()
 			.setInputCol("features")
 			.setOutputCol("indexedFeatures")
-			.setMaxCategories(10)
+			.setMaxCategories(32) // features with > 4 distinct values are treated as continuous.
 			.fit(transformedObjects)
 
-		val Array(trainingData, testData) = transformedObjects.randomSplit(Array(0.7, 0.3))
-
-		val rf = new RandomForestClassifier()
+		// Train a DecisionTree model.
+		val dt = new DecisionTreeClassifier()
 			.setLabelCol("indexedLabel")
 			.setFeaturesCol("indexedFeatures")
-			.setNumTrees(10)
 
+		// Convert indexed labels back to original labels.
 		val labelConverter = new IndexToString()
 			.setInputCol("prediction")
 			.setOutputCol("predictedLabel")
 			.setLabels(labelIndexer.labels)
 
+		// Chain indexers and tree in a Pipeline.
 		val pipeline = new Pipeline()
-			.setStages(Array(labelIndexer, featureIndexer, rf, labelConverter))
+			.setStages(Array(labelIndexer, featureIndexer, dt, labelConverter))
 
+		// Train model. This also runs the indexers.
 		val model = pipeline.fit(trainingData)
 
+		// Make predictions.
 		val predictions = model.transform(testData)
 
-		predictions.select("predictedLabel", "label", "features").show(5)
+		// Select example rows to display.
+		predictions.select("predictedLabel", "label")//.show(10)
+			.write
+			.format("com.databricks.spark.csv")
+			.option("header", "true")
+			.save("/home/ilia/Documents/bidata_docs/task10/session.dataset/res")
 
-		val evaluator = new MulticlassClassificationEvaluator()
-			.setLabelCol("indexedLabel")
-			.setPredictionCol("prediction")
-			.setMetricName("accuracy")
-		val accuracy = evaluator.evaluate(predictions)
-		println("Test Error = " + (1.0 - accuracy))
 
-		val rfModel = model.stages(2).asInstanceOf[RandomForestClassificationModel]
-		println("Learned classification forest model:\n" + rfModel.toDebugString)
+
+
+//		trainingData.show(100)
+//
+//		val lr = new LogisticRegression()
+//			.setMaxIter(10)
+//			.setRegParam(0.3)
+//			.setElasticNetParam(0.8)
+//			.fit(trainingData)
+//
+//		println(s"Coefficients: ${lr.coefficients} Intercept: ${lr.intercept}")
+//
+//		val trainingSummary = lr.summary
+//		val binarySummary = trainingSummary.asInstanceOf[BinaryLogisticRegressionSummary]
+//		val roc = binarySummary.roc
+//		val auc = binarySummary.areaUnderROC
+//
+//		println("roc: " + roc)
+//		println("AUC: " + auc)
+//
+//		val fMeasure: DataFrame = binarySummary.fMeasureByThreshold
+//		val maxFMeasure: Double = fMeasure.select(max("F-Measure")).head().getDouble(0)
+//		val bestThreshold: Double = fMeasure.where($"F-Measure" === maxFMeasure)
+//			.select("threshold").head().getDouble(0)
+//		lr.setThreshold(bestThreshold)
+//
+//		val summary = lr.evaluate(testData)
+//
+//		println("probability: " + summary)
+//		println(" predictions: ")
+//		val predictions: DataFrame = summary
+//			.predictions
+//	  	.select(col("probability"))
+//
+//		predictions.printSchema()
+//		val n = predictions.first.getAs[org.apache.spark.ml.linalg.Vector](0).size
+//		val vecToSeq = udf((v: Vector) => v.toArray)
+//		val exprs = (0 until n).map(i => $"_tmp".getItem(i).alias(s"f$i"))
+//
+//		predictions
+//			.select(vecToSeq($"probability").alias("_tmp"))
+//			.select(exprs:_*)
+//			.write
+//			.format("com.databricks.spark.csv")
+//			.option("header", "true")
+//			.save("/home/ilia/Documents/bidata_docs/task10/session.dataset/res")
 	}
 
-	def splitByRegex(str: String, r: Regex) = str match {
+	def splitByRegex(str: String, r: Regex): String = str match {
 		case r(group) => group
 	}
 }
